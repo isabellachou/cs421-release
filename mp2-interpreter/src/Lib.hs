@@ -1,5 +1,7 @@
+{- HLINT ignore "Used otherwise as a pattern" -}
 module Lib where
 import Data.HashMap.Strict as H (HashMap, empty, fromList, insert, lookup, union)
+import Text.Printf (vFmt)
 
 
 --- Data Types
@@ -88,10 +90,12 @@ liftIntOp op (IntVal x) (IntVal y) = IntVal $ op x y
 liftIntOp _ _ _ = ExnVal "Cannot lift"
 
 liftBoolOp :: (Bool -> Bool -> Bool) -> Val -> Val -> Val
-liftBoolOp = undefined
+liftBoolOp op (BoolVal x) (BoolVal y) = BoolVal $ op x y
+liftBoolOp _ _ _ = ExnVal "Cannot lift"
 
 liftCompOp :: (Int -> Int -> Bool) -> Val -> Val -> Val
-liftCompOp = undefined
+liftCompOp op (IntVal x) (IntVal y) = BoolVal $ op x y
+liftCompOp _ _ _ = ExnVal "Cannot lift"
 
 --- Eval
 --- ----
@@ -100,36 +104,68 @@ eval :: Exp -> Env -> Val
 
 --- ### Constants
 
-eval (IntExp i)  _ = undefined
-eval (BoolExp i) _ = undefined
+eval (IntExp i)  _ = IntVal i
+eval (BoolExp i) _ = BoolVal i
 
 --- ### Variables
 
-eval (VarExp s) env = undefined
+eval (VarExp s) env =
+    case H.lookup s env of
+        Just v -> v
+        Nothing -> ExnVal "No match in env"
 
 --- ### Arithmetic
 
-eval (IntOpExp op e1 e2) env = undefined
+eval (IntOpExp op e1 e2) env =
+    let v1 = eval e1 env
+        v2 = eval e2 env
+        Just f = H.lookup op intOps
+    in if op == "/" && v2 == IntVal 0 -- explicitly check for division by zero!
+       then ExnVal "Division by 0"
+       else liftIntOp f v1 v2
 
 --- ### Boolean and Comparison Operators
 
-eval (BoolOpExp op e1 e2) env = undefined
+eval (BoolOpExp op e1 e2) env =
+    let v1 = eval e1 env
+        v2 = eval e2 env
+        Just f = H.lookup op boolOps
+    in liftBoolOp f v1 v2
 
-eval (CompOpExp op e1 e2) env = undefined
+eval (CompOpExp op e1 e2) env =
+    let v1 = eval e1 env
+        v2 = eval e2 env
+        Just f = H.lookup op compOps
+    in liftCompOp f v1 v2
 
 --- ### If Expressions
 
-eval (IfExp e1 e2 e3) env = undefined
+eval (IfExp e1 e2 e3) env =
+    case eval e1 env of
+        BoolVal True -> eval e2 env
+        BoolVal False -> eval e3 env
+        _ -> ExnVal "Condition is not a Bool"
 
 --- ### Functions and Function Application
 
-eval (FunExp params body) env = undefined
+eval (FunExp params body) env =
+    CloVal params body env
 
-eval (AppExp e1 args) env = undefined
+eval (AppExp e1 args) env =
+    let v1 = eval e1 env
+        v2 = Prelude.map (`eval` env) args
+        in case v1 of
+            CloVal nup body nuenv ->
+                eval body (Prelude.foldr (\x map ->
+                    H.insert (fst x) (snd x) map) nuenv (zip nup v2))
+            _ -> ExnVal "Apply to non-closure"
 
 --- ### Let Expressions
 
-eval (LetExp pairs body) env = undefined
+eval (LetExp pairs body) env =
+    let locals = Prelude.map (\(v,e) -> (v, eval e env)) pairs
+        lVar = H.fromList locals
+    in eval body (H.union lVar env)
 
 --- Statements
 --- ----------
@@ -143,18 +179,39 @@ exec (PrintStmt e) penv env = (val, penv, env)
 
 --- ### Set Statements
 
-exec (SetStmt var e) penv env = undefined
+exec (SetStmt var e) penv env =
+    case eval e env of
+        ExnVal s -> ("exn: " ++ s, penv, env)
+        v -> ("", penv, H.insert var v env)
 
 --- ### Sequencing
 
-exec (SeqStmt []) penv env = undefined
+exec (SeqStmt []) penv env = ("", penv, env)
+exec (SeqStmt (s:ss)) penv env =
+  let (out1, penv1, env1) = exec s penv env
+      (out2, penv2, env2) = exec (SeqStmt ss) penv1 env1
+  in (out1 ++ out2, penv2, env2)
 
 --- ### If Statements
 
-exec (IfStmt e1 s1 s2) penv env = undefined
+exec (IfStmt e1 s1 s2) penv env =
+    let b1 = eval e1 env
+    in case eval e1 env of
+        BoolVal True -> exec s1 penv env
+        BoolVal False -> exec s2 penv env
+        _ -> (val, penv, env)
+        where val = show $ ExnVal "Condition is not a Bool"
 
 --- ### Procedure and Call Statements
 
-exec p@(ProcedureStmt name args body) penv env = undefined
+exec p@(ProcedureStmt name args body) penv env =
+    ("", H.insert name (ProcedureStmt name args body) penv, env)
 
-exec (CallStmt name args) penv env = undefined
+exec (CallStmt name args) penv env =
+    case H.lookup name penv of
+        Nothing -> ("Procedure " ++ name ++ " undefined", penv,env)
+        Just (ProcedureStmt _ params body) ->
+            exec body penv
+            (Prelude.foldr (\ (k,v) e -> H.insert k (eval v env) e) env $ zip params args)
+
+exec _ _ _ = undefined
