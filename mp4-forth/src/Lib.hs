@@ -98,7 +98,8 @@ liftIntOp _  _        = Nothing
 --- ### `liftCompOp`
 
 liftCompOp :: (Integer -> Integer -> Bool) -> IStack -> Maybe IStack
-liftCompOp = undefined
+liftCompOp op (x:y:xs) = Just $ (if y `op` x then -1 else 0) : xs
+liftCompOp _  _ = Nothing
 
 
 --- The Dictionary
@@ -122,35 +123,53 @@ initCompileOp = [ (":",    Define)
 --- ### Arithmetic Operators
 
 initArith :: Dictionary
-initArith = [ ("+",  Prim $ liftIStackOp $ liftIntOp (+))
+initArith = [ ("+",  Prim $ liftIStackOp $ liftIntOp (+)),
+              ("-",  Prim $ liftIStackOp $ liftIntOp (-)),
+              ("*",  Prim $ liftIStackOp $ liftIntOp (*)),
+              ("/",  Prim $ liftIStackOp $ liftIntOp div)
             ]
 
 --- ### Comparison Operators
 
 initComp :: Dictionary
-initComp = []
+initComp = [("<", Prim $ liftIStackOp $ liftCompOp (<)),
+            (">", Prim $ liftIStackOp $ liftCompOp (>)),
+            ("=", Prim $ liftIStackOp $ liftCompOp (==)),
+            ("<=", Prim $ liftIStackOp $ liftCompOp (<=)),
+            (">=", Prim $ liftIStackOp $ liftCompOp (>=)),
+            ("!=", Prim $ liftIStackOp $ liftCompOp (/=))]
 
 --- ### Stack Manipulations
 
 initIStackOp :: Dictionary
-initIStackOp = [ ("dup",  Prim $ liftIStackOp istackDup)
+initIStackOp = [ ("dup",  Prim $ liftIStackOp istackDup),
+                 ("swap", Prim $ liftIStackOp istackSwap),
+                 ("drop", Prim $ liftIStackOp istackDrop),
+                 ("rot", Prim $ liftIStackOp istackRot)
                ]
 
-initPrintOp = [ (".",  Prim printPop)
+initPrintOp = [ (".",  Prim printPop),
+                (".S", Prim printStack)
               ]
 
 istackDup :: IStack -> Maybe IStack
 istackDup (i:is) = Just $ i:i:is
 istackDup _      = Nothing
 
+-- swap: ( a b -- b a )
 istackSwap :: IStack -> Maybe IStack
-istackSwap = undefined
+istackSwap (x:y:xs) = Just (y:x:xs)
+istackSwap _ = Nothing
 
+-- drop: ( a -- )
 istackDrop :: IStack -> Maybe IStack
-istackDrop = undefined
+istackDrop (_:xs) = Just xs
+istackDrop _ = Nothing
 
+-- rot: ( a b c -- b c a )  -- brings 3rd item to top
 istackRot :: IStack -> Maybe IStack
-istackRot = undefined
+istackRot (x:y:z:xs) = Just (z:x:y:xs)
+istackRot _ = Nothing
 
 --- ### Popping the Stack
 
@@ -162,7 +181,7 @@ printPop _ = underflow
 --- ### Printing the Stack
 
 printStack :: ForthState -> ForthState
-printStack (istack, dict, out) = undefined
+printStack (istack, dict, out) = (istack, dict, unwords (map show (reverse istack)) : out)
 
 --- Evaluator
 --- ---------
@@ -212,25 +231,46 @@ cstackNext _ = Nothing
 
 --- ### Conditionals
 
-cstackIf :: CStack -> Maybe CStack
-cstackIf cstack = undefined
+-- First, we need a helper that creates a conditional transition at runtime:
+-- Pops the stack; if non-zero runs kthen, otherwise runs kelse
+transCond :: Transition -> Transition -> Transition
+transCond kthen kelse (i:is, d, o)
+    | i /= 0    = kthen (is, d, o)
+    | otherwise = kelse (is, d, o)
+transCond _ _ _ = underflow
 
+-- 'if' : push a new frame to accumulate the then-branch
+cstackIf :: CStack -> Maybe CStack
+cstackIf cstack = Just $ ("if", id) : cstack
+
+-- 'else' : save the completed then-branch, start accumulating else-branch
 cstackElse :: CStack -> Maybe CStack
-cstackElse cstack@(("if", _):_) = undefined
+cstackElse cstack@(("if", _):_) = Just $ ("else", id) : cstack
 cstackElse _ = Nothing
 
+-- 'then' : combine everything into one conditional transition
 cstackThen :: CStack -> Maybe CStack
-cstackThen (("else", kelse):("if", kif):(c, kold):cstack) = undefined
-cstackThen (("if", kif):(c, kold):cstack) = undefined
+    -- with else branch
+cstackThen (("else", kelse):("if", kif):(c, kold):cstack) = Just $ (c, transCond kif kelse . kold) : cstack
+    -- without else branch
+cstackThen (("if", kif):(c, kold):cstack) = Just $ (c, transCond kif id . kold) : cstack
 cstackThen _ = Nothing
 
 --- ### Indefinite Loops
-
 cstackBegin :: CStack -> Maybe CStack
 cstackBegin cstack = Just $ ("begin", id):cstack
 
+-- Helper: run kloop, pop condition, repeat if 0
+transUntil :: Transition -> Transition
+transUntil kloop state =
+    case kloop state of
+        (i:is, d, o) -> if i /= 0
+                        then (is, d, o) -- exit loop
+                        else transUntil kloop (is, d, o) -- repeat
+        _ -> underflow
+
 cstackUntil :: CStack -> Maybe CStack
-cstackUntil (("begin", kloop):(c, kold):cstack) = undefined
+cstackUntil (("begin", kloop):(c, kold):cstack) = Just $ (c, transUntil kloop . kold) : cstack
 cstackUntil _ = Nothing
 
 
